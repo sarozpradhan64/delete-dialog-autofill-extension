@@ -4,7 +4,7 @@
 (() => {
   "use strict";
 
-  const QUOTED_RE = /["'""]([^"'""]+)["'""]/g;
+  const QUOTED_RE = /(["'`])([^"'`]+)\1|([“”‘’])([^“”‘’]+)([“”‘’])/g;
 
   const FIXED_PHRASES = [
     "delete my project",
@@ -19,7 +19,7 @@
     "permanently delete",
   ];
 
-  function getFullNearbyText(input) {
+  function collectContextParts(input) {
     const parts = [];
     if (input.id) {
       const lbl = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
@@ -34,16 +34,36 @@
     if (p) parts.push(p.textContent);
     if (p && p.parentElement) parts.push(p.parentElement.textContent);
     if (input.placeholder) parts.push(input.placeholder);
-    return parts.join(" ");
+    return parts.filter(Boolean).map((part) => part.trim()).filter(Boolean);
+  }
+
+  function getFullNearbyText(input) {
+    return collectContextParts(input).join(" ");
+  }
+
+  function getQuotedMatches(text) {
+    const matches = [];
+    QUOTED_RE.lastIndex = 0;
+    let match;
+    while ((match = QUOTED_RE.exec(text)) !== null) {
+      const value = (match[2] || match[4] || "").trim();
+      if (value) matches.push(value);
+    }
+    return matches;
   }
 
   function resolveValue(input) {
-    const fullCtx = getFullNearbyText(input);
+    const contextParts = collectContextParts(input);
+    const fullCtx = contextParts.join(" ");
     const lowerCtx = fullCtx.toLowerCase();
 
-    QUOTED_RE.lastIndex = 0;
-    const qMatch = QUOTED_RE.exec(fullCtx);
-    if (qMatch) return qMatch[1];
+    for (const part of contextParts) {
+      const quoted = getQuotedMatches(part);
+      if (quoted.length === 1) return quoted[0];
+    }
+
+    const allQuoted = getQuotedMatches(fullCtx);
+    if (allQuoted.length === 1) return allQuoted[0];
 
     for (const phrase of FIXED_PHRASES) {
       if (lowerCtx.includes(phrase)) return phrase;
@@ -52,6 +72,7 @@
   }
 
   function nativeSet(input, value) {
+    input.focus();
     const proto = input instanceof HTMLTextAreaElement
       ? HTMLTextAreaElement.prototype
       : HTMLInputElement.prototype;
@@ -61,16 +82,21 @@
     } else {
       input.value = value;
     }
-    ["input", "change", "keyup", "keydown"].forEach((evt) => {
-      input.dispatchEvent(new Event(evt, { bubbles: true }));
-    });
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter" }));
+    input.blur();
   }
 
   function flashBadge(value) {
-    const existing = document.getElementById("__dca_badge__");
-    if (existing) existing.remove();
+    const existing = Array.from(document.querySelectorAll('[data-dca-badge="true"]'));
+    existing.forEach((node, index) => {
+      node.style.bottom = `${20 + (index + 1) * 52}px`;
+    });
+
     const badge = document.createElement("div");
-    badge.id = "__dca_badge__";
+    badge.dataset.dcaBadge = "true";
     badge.textContent = `✓ Auto-filled: "${value}"`;
     Object.assign(badge.style, {
       position: "fixed", bottom: "20px", right: "20px",
@@ -78,9 +104,15 @@
       fontFamily: "system-ui, sans-serif", fontSize: "13px",
       padding: "8px 14px", borderRadius: "8px",
       zIndex: "2147483647", boxShadow: "0 4px 14px rgba(0,0,0,.35)",
-      opacity: "1", transition: "opacity .4s ease", pointerEvents: "none",
+      opacity: "1", transition: "opacity .4s ease, bottom .2s ease", pointerEvents: "none",
     });
     document.body.appendChild(badge);
+
+    const badges = Array.from(document.querySelectorAll('[data-dca-badge="true"]'));
+    if (badges.length > 3) {
+      badges.slice(0, badges.length - 3).forEach((node) => node.remove());
+    }
+
     setTimeout(() => { badge.style.opacity = "0"; }, 2200);
     setTimeout(() => { badge.remove(); }, 2700);
   }
