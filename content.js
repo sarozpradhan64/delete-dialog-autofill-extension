@@ -19,20 +19,75 @@
     "permanently delete",
   ];
 
+  const CONFIRMATION_HINTS = [
+    "delete",
+    "remove",
+    "confirm",
+    "type",
+    "enter",
+    "write",
+    "exactly",
+    "to continue",
+    "to confirm",
+    "required",
+  ];
+
+  function isElementVisible(element) {
+    if (!(element instanceof Element)) return false;
+    if (!document.contains(element)) return false;
+
+    const style = window.getComputedStyle(element);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.visibility === "collapse" ||
+      style.opacity === "0"
+    ) {
+      return false;
+    }
+
+    if (element.closest("[hidden], [aria-hidden='true']")) return false;
+
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function getVisibleOwnText(element) {
+    if (!isElementVisible(element)) return "";
+
+    const text = Array.from(element.childNodes)
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent || "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    return text;
+  }
+
+  function pushVisibleText(parts, element) {
+    const text = getVisibleOwnText(element);
+    if (text) parts.push(text);
+  }
+
   function collectContextParts(input) {
     const parts = [];
     if (input.id) {
       const lbl = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
-      if (lbl) parts.push(lbl.textContent);
+      if (lbl) pushVisibleText(parts, lbl);
     }
     const wrap = input.closest("label");
-    if (wrap) parts.push(wrap.textContent);
+    if (wrap) pushVisibleText(parts, wrap);
     let sib = input.previousElementSibling;
     let n = 0;
-    while (sib && n < 3) { parts.push(sib.textContent); sib = sib.previousElementSibling; n++; }
+    while (sib && n < 3) {
+      pushVisibleText(parts, sib);
+      sib = sib.previousElementSibling;
+      n++;
+    }
     const p = input.parentElement;
-    if (p) parts.push(p.textContent);
-    if (p && p.parentElement) parts.push(p.parentElement.textContent);
+    if (p) pushVisibleText(parts, p);
+    if (p && p.parentElement) pushVisibleText(parts, p.parentElement);
     if (input.placeholder) parts.push(input.placeholder);
     return parts.filter(Boolean).map((part) => part.trim()).filter(Boolean);
   }
@@ -56,6 +111,10 @@
     const contextParts = collectContextParts(input);
     const fullCtx = contextParts.join(" ");
     const lowerCtx = fullCtx.toLowerCase();
+
+    if (!CONFIRMATION_HINTS.some((hint) => lowerCtx.includes(hint))) {
+      return null;
+    }
 
     for (const part of contextParts) {
       const quoted = getQuotedMatches(part);
@@ -135,6 +194,8 @@
     );
     inputs.forEach((input) => {
       if (filled.has(input)) return;
+      if (!isElementVisible(input)) return;
+      if (input.disabled || input.readOnly) return;
       if (input.value.trim() !== "") return;
       const value = resolveValue(input);
       if (!value) return;
