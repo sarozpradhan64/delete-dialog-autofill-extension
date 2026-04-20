@@ -4,7 +4,7 @@
 (() => {
   "use strict";
 
-  const QUOTED_RE = /(["'`])([^"'`]+)\1|([“”‘’])([^“”‘’]+)([“”‘’])/g;
+  const QUOTED_RE = /(^|[^\p{L}\p{N}_])(["`])([^"`]+)\2(?=$|[^\p{L}\p{N}_])|(^|[^\p{L}\p{N}_])(“([^”]+)”|‘([^’]+)’)/gu;
 
   const FIXED_PHRASES = [
     "delete my project",
@@ -31,6 +31,15 @@
     "to confirm",
     "required",
   ];
+
+  // Platform-specific containers that commonly hold the exact confirmation value
+  const PLATFORM_VALUE_CONTAINER_SELECTOR = [
+    ".tw-c-form-field",     // Netlify form field wrapper
+    ".form-field-container", // Netlify inner field container
+    "label",
+    "form",
+    "[role='dialog']",
+  ].join(", ");
 
   function isElementVisible(element) {
     if (!(element instanceof Element)) return false;
@@ -133,10 +142,39 @@
     QUOTED_RE.lastIndex = 0;
     let match;
     while ((match = QUOTED_RE.exec(text)) !== null) {
-      const value = (match[2] || match[4] || "").trim();
+      const value = (match[3] || match[6] || match[7] || "").trim();
       if (value) matches.push(value);
     }
     return matches;
+  }
+
+  function getExplicitValueCandidates(input) {
+    const candidates = [];
+    const seen = new Set();
+
+    function add(text) {
+      const value = (text || "").replace(/\s+/g, " ").trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      candidates.push(value);
+    }
+
+    const describedBy = (input.getAttribute("aria-describedby") || "").trim();
+    if (describedBy) {
+      describedBy.split(/\s+/).forEach((id) => {
+        const element = document.getElementById(id);
+        if (!element || !isElementVisible(element)) return;
+        add(getVisibleText(element));
+        element.querySelectorAll("code, pre").forEach((node) => add(getVisibleText(node)));
+      });
+    }
+
+    const container = input.closest(PLATFORM_VALUE_CONTAINER_SELECTOR);
+    if (container && isElementVisible(container)) {
+      container.querySelectorAll("code, pre").forEach((node) => add(getVisibleText(node)));
+    }
+
+    return candidates;
   }
 
   function extractInstructionValue(text) {
@@ -174,6 +212,9 @@
       const quoted = getQuotedMatches(part);
       if (quoted.length === 1) return quoted[0];
     }
+
+    const explicitValues = getExplicitValueCandidates(input);
+    if (explicitValues.length === 1) return explicitValues[0];
 
     const allQuoted = getQuotedMatches(fullCtx);
     if (allQuoted.length === 1) return allQuoted[0];
