@@ -4,7 +4,7 @@
 (() => {
   "use strict";
 
-  const QUOTED_RE = /(["'`])([^"'`]+)\1|([“”‘’])([^“”‘’]+)([“”‘’])/g;
+  const QUOTED_RE = /(^|[^\p{L}\p{N}_])(["`])([^"`]+)\2(?=$|[^\p{L}\p{N}_])|(^|[^\p{L}\p{N}_])(“([^”]+)”|‘([^’]+)’)/gu;
 
   const FIXED_PHRASES = [
     "delete my project",
@@ -19,20 +19,116 @@
     "permanently delete",
   ];
 
+  const CONFIRMATION_HINTS = [
+    "delete",
+    "remove",
+    "confirm",
+    "type",
+    "enter",
+    "write",
+    "exactly",
+    "to continue",
+    "to confirm",
+    "required",
+  ];
+
+  // Platform-specific containers that commonly hold the exact confirmation value
+  const PLATFORM_VALUE_CONTAINER_SELECTOR = [
+    ".tw-c-form-field",     // Netlify form field wrapper
+    ".form-field-container", // Netlify inner field container
+    "label",
+    "form",
+    "[role='dialog']",
+  ].join(", ");
+
+  function isElementVisible(element) {
+    if (!(element instanceof Element)) return false;
+    if (!document.contains(element)) return false;
+
+    const style = window.getComputedStyle(element);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.visibility === "collapse" ||
+      style.opacity === "0"
+    ) {
+      return false;
+    }
+
+    if (element.closest("[hidden], [aria-hidden='true']")) return false;
+
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function getVisibleText(element) {
+    if (!isElementVisible(element)) return "";
+
+    const walker = document.createTreeWalker(
+      element,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          const parent = node.parentElement;
+          if (!parent || !isElementVisible(parent)) {
+            return NodeFilter.FILTER_REJECT;
+          }
+
+          if (!(node.textContent || "").trim()) {
+            return NodeFilter.FILTER_REJECT;
+          }
+
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      }
+    );
+
+    const segments = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      segments.push((node.textContent || "").trim());
+    }
+
+    const text = segments.join(" ").replace(/\s+/g, " ").trim();
+
+    return text;
+  }
+
+  function pushVisibleText(parts, element) {
+    const text = getVisibleText(element);
+    if (text) parts.push(text);
+  }
+
+  function collectPreviousSiblingText(parts, element, limit = 3) {
+    let sibling = element.previousElementSibling;
+    let count = 0;
+
+    while (sibling && count < limit) {
+      pushVisibleText(parts, sibling);
+      sibling = sibling.previousElementSibling;
+      count++;
+    }
+  }
+
   function collectContextParts(input) {
     const parts = [];
     if (input.id) {
       const lbl = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
-      if (lbl) parts.push(lbl.textContent);
+      if (lbl) pushVisibleText(parts, lbl);
     }
     const wrap = input.closest("label");
-    if (wrap) parts.push(wrap.textContent);
-    let sib = input.previousElementSibling;
-    let n = 0;
-    while (sib && n < 3) { parts.push(sib.textContent); sib = sib.previousElementSibling; n++; }
+    if (wrap) pushVisibleText(parts, wrap);
+    collectPreviousSiblingText(parts, input);
     const p = input.parentElement;
-    if (p) parts.push(p.textContent);
-    if (p && p.parentElement) parts.push(p.parentElement.textContent);
+    if (p) pushVisibleText(parts, p);
+    if (p && p.parentElement) pushVisibleText(parts, p.parentElement);
+    if (p) collectPreviousSiblingText(parts, p);
+    if (p && p.parentElement) collectPreviousSiblingText(parts, p.parentElement);
+    if (p && p.parentElement && p.parentElement.parentElement) {
+      const container = p.parentElement.parentElement;
+      pushVisibleText(parts, container);
+      collectPreviousSiblingText(parts, container);
+    }
     if (input.placeholder) parts.push(input.placeholder);
     return parts.filter(Boolean).map((part) => part.trim()).filter(Boolean);
   }
@@ -46,10 +142,61 @@
     QUOTED_RE.lastIndex = 0;
     let match;
     while ((match = QUOTED_RE.exec(text)) !== null) {
-      const value = (match[2] || match[4] || "").trim();
+      const value = (match[3] || match[6] || match[7] || "").trim();
       if (value) matches.push(value);
     }
     return matches;
+  }
+
+  function getExplicitValueCandidates(input) {
+    const candidates = [];
+    const seen = new Set();
+
+    function add(text) {
+      const value = (text || "").replace(/\s+/g, " ").trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      candidates.push(value);
+    }
+
+    const describedBy = (input.getAttribute("aria-describedby") || "").trim();
+    if (describedBy) {
+      describedBy.split(/\s+/).forEach((id) => {
+        const element = document.getElementById(id);
+        if (!element || !isElementVisible(element)) return;
+        add(getVisibleText(element));
+        element.querySelectorAll("code, pre").forEach((node) => add(getVisibleText(node)));
+      });
+    }
+
+    const container = input.closest(PLATFORM_VALUE_CONTAINER_SELECTOR);
+    if (container && isElementVisible(container)) {
+      container.querySelectorAll("code, pre").forEach((node) => add(getVisibleText(node)));
+    }
+
+    return candidates;
+  }
+
+  function extractInstructionValue(text) {
+    const patterns = [
+      /\b(?:type|enter|write)\s+(.+?)\s+(?:below\s+)?to\s+confirm\b/i,
+      /\b(?:type|enter|write)\s+(.+?)\s+(?:below\s+)?to\s+continue\b/i,
+      /\b(?:type|enter|write)\s+(.+?)\s+(?:below\s+)?to\s+delete\b/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (!match) continue;
+
+      const value = match[1]
+        .replace(/\s+/g, " ")
+        .replace(/^[:\- ]+|[:\- ]+$/g, "")
+        .trim();
+
+      if (value) return value;
+    }
+
+    return null;
   }
 
   function resolveValue(input) {
@@ -57,13 +204,23 @@
     const fullCtx = contextParts.join(" ");
     const lowerCtx = fullCtx.toLowerCase();
 
+    if (!CONFIRMATION_HINTS.some((hint) => lowerCtx.includes(hint))) {
+      return null;
+    }
+
     for (const part of contextParts) {
       const quoted = getQuotedMatches(part);
       if (quoted.length === 1) return quoted[0];
     }
 
+    const explicitValues = getExplicitValueCandidates(input);
+    if (explicitValues.length === 1) return explicitValues[0];
+
     const allQuoted = getQuotedMatches(fullCtx);
     if (allQuoted.length === 1) return allQuoted[0];
+
+    const instructionValue = extractInstructionValue(fullCtx);
+    if (instructionValue) return instructionValue;
 
     for (const phrase of FIXED_PHRASES) {
       if (lowerCtx.includes(phrase)) return phrase;
@@ -135,6 +292,8 @@
     );
     inputs.forEach((input) => {
       if (filled.has(input)) return;
+      if (!isElementVisible(input)) return;
+      if (input.disabled || input.readOnly) return;
       if (input.value.trim() !== "") return;
       const value = resolveValue(input);
       if (!value) return;
